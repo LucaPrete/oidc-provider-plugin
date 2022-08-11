@@ -29,13 +29,17 @@ import com.cloudbees.plugins.credentials.CredentialsScope;
 import com.cloudbees.plugins.credentials.impl.BaseStandardCredentials;
 import edu.umd.cs.findbugs.annotations.CheckForNull;
 import edu.umd.cs.findbugs.annotations.NonNull;
+import hudson.EnvVars;
 import hudson.ExtensionList;
 import hudson.Util;
 import hudson.model.Run;
 import hudson.util.FormValidation;
+import hudson.util.LogTaskListener;
 import hudson.util.Secret;
 import io.jsonwebtoken.JwtBuilder;
 import io.jsonwebtoken.Jwts;
+import java.io.IOException;
+import java.lang.InterruptedException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.security.KeyFactory;
@@ -49,6 +53,8 @@ import java.security.spec.RSAPublicKeySpec;
 import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.Date;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import java.util.Objects;
 import jenkins.model.Jenkins;
 import net.sf.json.JSONArray;
@@ -79,6 +85,10 @@ public abstract class IdTokenCredentials extends BaseStandardCredentials {
     private @CheckForNull String audience;
 
     private transient @CheckForNull Run<?, ?> build;
+
+    private static final Logger LOGGER = Logger.getLogger(IdTokenCredentials.class.getName());
+
+    private LogTaskListener logTaskListener;
 
     protected IdTokenCredentials(CredentialsScope scope, String id, String description) {
         this(scope, id, description, generatePrivateKey());
@@ -153,13 +163,32 @@ public abstract class IdTokenCredentials extends BaseStandardCredentials {
             setIssuer(issuer != null ? issuer : findIssuer().url()).
             setAudience(audience).
             setExpiration(Date.from(new Date().toInstant().plus(1, ChronoUnit.HOURS))).
-            setIssuedAt(new Date());
+            setIssuedAt(new Date()).
+            setSubject(Jenkins.get().getRootUrl());
+
+        // Set additional claims
         if (build != null) {
-            builder.setSubject(build.getParent().getAbsoluteUrl()).
-                claim("build_number", build.getNumber());
-        } else {
-            builder.setSubject(Jenkins.get().getRootUrl());
+            builder.claim("build_number", build.getNumber());
         }
+        LogTaskListener listener = new LogTaskListener(LOGGER, Level.INFO);
+        try {
+            EnvVars envVars = build.getEnvironment(listener);
+            for (String key: envVars.keySet()) {
+              LOGGER.log(Level.INFO, String.format("%s -> %s", key, envVars.get(key)));
+            }
+            if (envVars.containsKey("GIT_BRANCH")) {
+                builder.claim("git_branch", envVars.get("GIT_BRANCH"));
+            }
+            if (envVars.containsKey("GIT_COMMIT")) {
+                builder.claim("git_commit", envVars.get("GIT_COMMIT"));
+            }
+            if (envVars.containsKey("GIT_URL")) {
+                builder.claim("git_url", envVars.get("GIT_URL"));
+            }
+        } catch(InterruptedException | IOException e) {
+            LOGGER.log(Level.WARNING, String.format("Cannot retriev build environment variables: %s", e.toString()));
+        }
+
         return builder.
             signWith(kp.getPrivate()).
             compact();
@@ -255,5 +284,4 @@ public abstract class IdTokenCredentials extends BaseStandardCredentials {
         }
 
     }
-
 }
